@@ -35,23 +35,30 @@ function _M.new(dict_name, limit, window)
     return setmetatable(self, mt)
 end
 
-
+-- 流量进入
+-- key 请求唯一标记，如ip,uid,业务方id
+-- commit 是否提交计入计数器
 function _M.incoming(self, key, commit)
-    local dict = self.dict
-    local limit = self.limit
-    local window = self.window
+    local dict = self.dict -- ngx_lua内存共享字典
+    local limit = self.limit -- 限制的访问次数
+    local window = self.window -- 限制的时间窗口（单位：秒）
 
     local remaining, ok, err
 
     if commit then
+        -- 每次提交请求，次数 -1 
         remaining, err = dict:incr(key, -1, limit)
+        -- 扣除失败，返回错误
         if not remaining then
             return nil, err
         end
-
+        
+        -- 剩余次数 == 总限制数 - 1, 即时间段内第一个请求进来
         if remaining == limit - 1 then
+            -- 设置共享字典变量的过期时间
             ok, err = dict:expire(key, window)
             if not ok then
+                -- 写入过程失败，共享字典变量已经不存在，如：过期，则重新开启一个计数窗口
                 if err == "not found" then
                     remaining, err = dict:incr(key, -1, limit)
                     if not remaining then
