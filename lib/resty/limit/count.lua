@@ -37,7 +37,7 @@ end
 
 -- 流量进入
 -- key 请求唯一标记，如ip,uid,业务方id
--- commit 是否提交计入计数器
+-- commit 是否提交计入计数器. commit为true，则当前请求计入计数器。为false, 则空转, 返回剩余次数。
 function _M.incoming(self, key, commit)
     local dict = self.dict -- ngx_lua内存共享字典
     local limit = self.limit -- 限制的访问次数
@@ -77,13 +77,16 @@ function _M.incoming(self, key, commit)
         end
 
     else
+        -- 请求进入时，不直接提交到计数器，只返回剩余次数
         remaining = (dict:get(key) or limit) - 1
     end
 
+    -- 达到限额，剩余次数不足，返回 rejected - 拒绝访问
     if remaining < 0 then
         return nil, "rejected"
     end
 
+    -- 未达到限额, 返回剩余次数
     return 0, remaining
 end
 
