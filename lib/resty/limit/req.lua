@@ -24,7 +24,7 @@ local max = math.max
 -- hash-typed values as in redis.
 ffi.cdef[[
     struct lua_resty_limit_req_rec {
-        unsigned long        excess;
+        unsigned long        excess; // 已
         uint64_t             last;  /* time in milliseconds */
         /* integer value, 1 corresponds to 0.001 r/s */
     };
@@ -46,8 +46,11 @@ local mt = {
     __index = _M
 }
 
-
+-- 实例化一个限流器
+-- rate 每秒接受的请求数（滴水速度）
+-- burst 每秒允许堆积的请求数（桶容量）
 function _M.new(dict_name, rate, burst)
+    -- ngx 共享内存字典变量
     local dict = ngx_shared[dict_name]
     if not dict then
         return nil, "shared dict not found"
@@ -57,8 +60,8 @@ function _M.new(dict_name, rate, burst)
 
     local self = {
         dict = dict,
-        rate = rate * 1000,
-        burst = burst * 1000,
+        rate = rate * 1000, -- 一秒允许访问的请求数（滴水速度）
+        burst = burst * 1000, -- 一秒允许堆积的请求数（桶容量）
     }
 
     return setmetatable(self, mt)
@@ -70,21 +73,28 @@ end
 -- FIXME we have a (small) race-condition window between dict:get() and
 -- dict:set() across multiple nginx worker processes. The size of the
 -- window is proportional to the number of workers.
+-- 请求提交进来，计算其需要等待的时间，是否需要被拒绝
+-- commit：是否需要将此次请求记录到统计里
 function _M.incoming(self, key, commit)
     local dict = self.dict
     local rate = self.rate
+    --精确到毫秒的时间戳
     local now = ngx_now() * 1000
 
     local excess
 
     -- it's important to anchor the string value for the read-only pointer
     -- cdata:
+    -- 处处当前应用的计数器
     local v = dict:get(key)
     if v then
+        -- 验证已存储的数据格式
         if type(v) ~= "string" or #v ~= rec_size then
             return nil, "shdict abused by other users"
         end
+        -- 以字符串v创建一个const_rec_ptr_type类型的变量
         local rec = ffi_cast(const_rec_ptr_type, v)
+        -- 取出上次统计的时间,计算时差
         local elapsed = now - tonumber(rec.last)
 
         -- print("elapsed: ", elapsed, "ms")
@@ -92,19 +102,25 @@ function _M.incoming(self, key, commit)
         -- we do not handle changing rate values specifically. the excess value
         -- can get automatically adjusted by the following formula with new rate
         -- values rather quickly anyway.
+        -- 可用请求数空间（桶剩余容量） = max(上次统计时已接受的请求数 - 每秒限制访问的请求数 * 上次统计时差/1000 + 1000, 0)
+        -- 可用请求数空间（桶剩余容量）N = max(上次统计时已占用容量 - 这段时间腾出的空间 + 1000, 0)
+        -- 如果N大于0，说明还可以接收 N个请求
+        -- 如果N小于0，说明桶满了
         excess = max(tonumber(rec.excess) - rate * abs(elapsed) / 1000 + 1000,
                      0)
 
         -- print("excess: ", excess)
-
+        -- 桶已满，拒绝访问
         if excess > self.burst then
             return nil, "rejected"
         end
 
     else
+        -- 首次访问，直接放行
         excess = 0
     end
 
+    -- 放行的请求，如果需要统计本次请求，则更新计数器
     if commit then
         rec_cdata.excess = excess
         rec_cdata.last = now
@@ -112,6 +128,7 @@ function _M.incoming(self, key, commit)
     end
 
     -- return the delay in seconds, as well as excess
+    -- 返回延迟的时间，
     return excess / rate, excess / 1000
 end
 
