@@ -23,9 +23,10 @@ local max = math.max
 -- TODO: we could avoid the tricky FFI cdata when lua_shared_dict supports
 -- hash-typed values as in redis.
 ffi.cdef[[
+    /* 定义一个限速器结构体 */
     struct lua_resty_limit_req_rec {
-        unsigned long        excess; // 已堆积的请求数，数值放到了1000倍
-        uint64_t             last;  /* time in milliseconds */ //上次记录的时间戳精确到毫秒
+        unsigned long        excess; /* 已堆积的请求数，数值放到了1000倍 */
+        uint64_t             last;  /* time in milliseconds */ /* 上次记录的时间戳精确到毫秒 */
         /* integer value, 1 corresponds to 0.001 r/s */
     };
 ]]
@@ -34,6 +35,7 @@ local rec_size = ffi.sizeof("struct lua_resty_limit_req_rec")
 
 -- we can share the cdata here since we only need it temporarily for
 -- serialization inside the shared dict:
+-- 实例化一个限速器结构体
 local rec_cdata = ffi.new("struct lua_resty_limit_req_rec")
 
 
@@ -86,7 +88,7 @@ function _M.incoming(self, key, commit)
 
     -- it's important to anchor the string value for the read-only pointer
     -- cdata:
-    -- 取出当计数器
+    -- 取出当前key的计数器
     local v = dict:get(key)
     if v then
         -- 验证已存储的数据格式
@@ -95,7 +97,7 @@ function _M.incoming(self, key, commit)
         end
         -- 以字符串v创建一个const_rec_ptr_type类型的变量
         local rec = ffi_cast(const_rec_ptr_type, v)
-        -- 取出上次统计的时间,计算时差
+        -- 取出上次统计的时间,计算时差（毫秒级）
         local elapsed = now - tonumber(rec.last)
 
         -- print("elapsed: ", elapsed, "ms")
@@ -104,7 +106,7 @@ function _M.incoming(self, key, commit)
         -- can get automatically adjusted by the following formula with new rate
         -- values rather quickly anyway.
         -- 本次遗留的请求数 = 上次遗留的请求数 - 预设速率 X 过去的时间 + 1
-        -- 可用请求数空间（桶剩余容量）N = max(上次统计时已占用容量 - 这段时间腾出的空间 + 1000, 0)
+        -- 当前堆积的请求 N = max(上次统计时已占用容量 - 这段时间腾出的空间 + 1000, 0)
         excess = max(tonumber(rec.excess) - rate * abs(elapsed) / 1000 + 1000,
                      0)
         
