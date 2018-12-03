@@ -24,8 +24,8 @@ local max = math.max
 -- hash-typed values as in redis.
 ffi.cdef[[
     struct lua_resty_limit_req_rec {
-        unsigned long        excess; // 已
-        uint64_t             last;  /* time in milliseconds */
+        unsigned long        excess; // 已堆积的请求数，数值放到了1000倍
+        uint64_t             last;  /* time in milliseconds */ //上次记录的时间戳精确到毫秒
         /* integer value, 1 corresponds to 0.001 r/s */
     };
 ]]
@@ -47,7 +47,7 @@ local mt = {
 }
 
 -- 实例化一个限流器
--- rate 每秒接受的请求数（滴水速度）
+-- rate 每秒接受的请求数（滴水速度）qps
 -- burst 每秒允许堆积的请求数（桶容量）
 function _M.new(dict_name, rate, burst)
     -- ngx 共享内存字典变量
@@ -60,8 +60,8 @@ function _M.new(dict_name, rate, burst)
 
     local self = {
         dict = dict,
-        rate = rate * 1000, -- 一秒允许访问的请求数（滴水速度）
-        burst = burst * 1000, -- 一秒允许堆积的请求数（桶容量）
+        rate = rate * 1000, -- 放大1000倍, 可以精确到毫秒级速率（滴水速度）
+        burst = burst * 1000, -- 放大1000倍, 可以精确到毫秒级速率（桶容量）
     }
 
     return setmetatable(self, mt)
@@ -77,15 +77,16 @@ end
 -- commit：是否需要将此次请求记录到统计里
 function _M.incoming(self, key, commit)
     local dict = self.dict
+    -- 放大1000倍的qps限制值
     local rate = self.rate
-    --精确到毫秒的时间戳
+    -- 精确到毫秒的时间戳
     local now = ngx_now() * 1000
 
     local excess
 
     -- it's important to anchor the string value for the read-only pointer
     -- cdata:
-    -- 处处当前应用的计数器
+    -- 取出当计数器
     local v = dict:get(key)
     if v then
         -- 验证已存储的数据格式
@@ -102,15 +103,13 @@ function _M.incoming(self, key, commit)
         -- we do not handle changing rate values specifically. the excess value
         -- can get automatically adjusted by the following formula with new rate
         -- values rather quickly anyway.
-        -- 可用请求数空间（桶剩余容量） = max(上次统计时已接受的请求数 - 每秒限制访问的请求数 * 上次统计时差/1000 + 1000, 0)
+        -- 本次遗留的请求数 = 上次遗留的请求数 - 预设速率 X 过去的时间 + 1
         -- 可用请求数空间（桶剩余容量）N = max(上次统计时已占用容量 - 这段时间腾出的空间 + 1000, 0)
-        -- 如果N大于0，说明还可以接收 N个请求
-        -- 如果N小于0，说明桶满了
         excess = max(tonumber(rec.excess) - rate * abs(elapsed) / 1000 + 1000,
                      0)
-
+        
         -- print("excess: ", excess)
-        -- 桶已满，拒绝访问
+        -- 本次堆积请求大于桶容量，拒绝访问
         if excess > self.burst then
             return nil, "rejected"
         end
@@ -128,7 +127,7 @@ function _M.incoming(self, key, commit)
     end
 
     -- return the delay in seconds, as well as excess
-    -- 返回延迟的时间，
+    -- 本次堆积小于桶容量（可能无堆积），返回延迟的时间，当前超出请求数（缩小1000倍的正常值）
     return excess / rate, excess / 1000
 end
 
